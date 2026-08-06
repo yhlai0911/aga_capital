@@ -44,11 +44,19 @@ jobs:
               raise RuntimeError('embedded script payload not found')
           payload = ''.join(line.strip() for line in match.group(1).splitlines())
           script = gzip.decompress(base64.b64decode(payload)).decode('utf-8')
-          old = '''    # Signal at t-1 can be implemented on t only when the asset is observed/tradable.\n    position = np.zeros(len(true_lp))\n    for t in range(max(train_end, 1), len(true_lp)):\n        if observed[t]:\n            position[t] = desired[t - 1]\n        else:\n            position[t] = position[t - 1]\n'''
-          new = '''    # The close-to-close return at t can only use information known at t-1.\n    # A position change is therefore allowed only when t-1 had an observable\n    # synthetic trade; using observed[t] here would leak same-day availability.\n    position = np.zeros(len(true_lp))\n    for t in range(max(train_end, 1), len(true_lp)):\n        if observed[t - 1]:\n            position[t] = desired[t - 1]\n        else:\n            position[t] = position[t - 1]\n'''
-          if old not in script:
+
+          old_timing = '''    # Signal at t-1 can be implemented on t only when the asset is observed/tradable.\n    position = np.zeros(len(true_lp))\n    for t in range(max(train_end, 1), len(true_lp)):\n        if observed[t]:\n            position[t] = desired[t - 1]\n        else:\n            position[t] = position[t - 1]\n'''
+          new_timing = '''    # The close-to-close return at t can only use information known at t-1.\n    # A position change is therefore allowed only when t-1 had an observable\n    # synthetic trade; using observed[t] here would leak same-day availability.\n    position = np.zeros(len(true_lp))\n    for t in range(max(train_end, 1), len(true_lp)):\n        if observed[t - 1]:\n            position[t] = desired[t - 1]\n        else:\n            position[t] = position[t - 1]\n'''
+          if old_timing not in script:
               raise RuntimeError('expected trading-timing block not found')
-          script = script.replace(old, new)
+          script = script.replace(old_timing, new_timing)
+
+          old_eval = '''def evaluate_method(method: str, true_lp: np.ndarray, est_lp: np.ndarray, observed: np.ndarray,\n                    train_end: int) -> Dict[str, float | str]:\n    out: Dict[str, float | str] = {"method": method}\n    out.update(reconstruction_metrics(true_lp, est_lp, observed, train_end))\n    out.update(forecast_metrics(true_lp, est_lp, train_end, 1))\n    out.update(forecast_metrics(true_lp, est_lp, train_end, 5))\n    for cost in COST_BPS:\n        out.update(trading_metrics(true_lp, est_lp, observed, train_end, cost, long_short=False))\n    return out\n'''
+          new_eval = '''def evaluate_method(method: str, true_lp: np.ndarray, est_lp: np.ndarray, observed: np.ndarray,\n                    train_end: int) -> Dict[str, float | str]:\n    out: Dict[str, float | str] = {"method": method}\n    out.update(reconstruction_metrics(true_lp, est_lp, observed, train_end))\n    if method == "Interpolation":\n        # This path uses the next observed price and is therefore an ex-post\n        # reconstruction bound only. It must not enter OOS forecasting or trading.\n        for h in (1, 5):\n            out.update({f"forecast_mse_h{h}": np.nan, f"oos_r2_h{h}": np.nan, f"direction_h{h}": np.nan})\n        for cost in COST_BPS:\n            tag = int(cost)\n            out.update({\n                f"ann_return_{tag}bps": np.nan,\n                f"gross_ann_return_{tag}bps": np.nan,\n                f"sharpe_{tag}bps": np.nan,\n                f"max_drawdown_{tag}bps": np.nan,\n                f"turnover_{tag}bps": np.nan,\n            })\n        return out\n    out.update(forecast_metrics(true_lp, est_lp, train_end, 1))\n    out.update(forecast_metrics(true_lp, est_lp, train_end, 5))\n    for cost in COST_BPS:\n        out.update(trading_metrics(true_lp, est_lp, observed, train_end, cost, long_short=False))\n    return out\n'''
+          if old_eval not in script:
+              raise RuntimeError('expected evaluation block not found')
+          script = script.replace(old_eval, new_eval)
+
           path = Path('research/lti_cross_market_jtapf/run_cross_market_jtapf.py')
           path.write_text(script, encoding='utf-8')
           PY
@@ -70,7 +78,7 @@ jobs:
           LTI_REPS: "2"
           LTI_PARTICLES: "160"
           LTI_MIN_OBS: "1700"
-          LTI_MAX_PER_MARKET: "12"
+          LTI_MAX_PER_MARKET: "15"
           LTI_SEED: "20260806"
         run: python research/lti_cross_market_jtapf/run_cross_market_jtapf.py
 
